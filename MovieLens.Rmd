@@ -1,0 +1,567 @@
+---
+title: "MovieLens Capstone Project 1"
+author: "Lukasz Kolodziejek"
+date: "25/09/2019"
+output:
+  pdf_document: default
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+## Overview
+
+This is MovieLens Capstone project 1 for online course HarvardX: PH125.9x
+
+Goal of this project is to document, analyse and optimize Root Mean Square Error (RMSE) of movie recommendation algorithm.
+
+In order to achieve this different models will be created to predict ratings given available features.
+
+This project is based on publicly available 10M version of the MovieLens dataset, which can be accessed here: https://grouplens.org/datasets/movielens/10m/
+
+## Data ingestion
+
+Data ingestion part of the code comes from the course HarvardX: PH125.9x and is part of project definition
+
+```{r ingestion, results="hide", warning=FALSE, message=FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+# Analysis
+
+Training dataset has following columns: userId, movieId, rating, timestamp, title, genres and 9000055 rows.
+
+Each user can rate single movie only once, hence pair 'userId, movieId' can be treated as unique identifier.
+
+Genres do not come in tidy format, as movie can have multiple genres assign and separated with '|' sign. 
+
+## Quiz
+
+### Q1
+
+How many rows and columns are there in the edx dataset?
+
+```{r dataset}
+dim(edx)
+```
+
+### Q2
+
+Number of zeroes given as ratings in datase
+```{r numberofzeroes}
+nrow(filter(edx, rating==0))
+```
+
+Number of threes given as ratings in datase
+```{r numberofthrees}
+nrow(filter(edx, rating==3))
+```
+
+### Q3
+
+How many different movies are there in edx dataset?
+```{r numberofuniquemovies}
+edx %>% summarize(n_movies = n_distinct(movieId))
+```
+
+### Q4
+
+How many different users are there in edx dataset?
+```{r numberofuniqueusers}
+edx %>% summarize(n_movies = n_distinct(userId))
+```
+
+### Q5
+
+How many movie ratings are in each of the following genres in the edx dataset?
+```{r movieratingspergenre}
+edx %>% separate_rows(genres, sep = "\\|") %>%
+  group_by(genres) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+```
+
+### Q6
+
+Which movie has the greatest number of ratings?
+```{r titlewithmostratings}
+edx %>% 
+  group_by(title) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  top_n(1)
+```
+
+### Q7 & Q8
+
+What are the five most given ratings in order from most to least?
+```{r mostpopularrates}
+edx %>% 
+  group_by(rating) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count)) %>%
+  top_n(5)
+```
+
+## Model Optimization
+
+Let's start with definition of RMSE function as it will be used to assess model's performance
+
+```{r rmsefunction, results="hide"}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+### Model 1 - Just the average
+
+First model will be very simple: we will predict all ratings as an average of them
+
+```{r model1}
+mu <- mean(edx$rating)  
+model_1_rmse <- RMSE(validation$rating, mu)
+```
+
+First model provides following RMSE:
+
+```{r model1rmse, echo=FALSE}
+model_1_rmse
+```
+
+```{r model1results, include=FALSE}
+rmse_results <- tibble(method = "Model 1 - Just the average", RMSE = model_1_rmse)
+
+```
+
+### Model 2 - movie effect
+
+In this model we will be predicting average rating and adjusting for movie effect (average rating for a specific movie).
+
+This model assumes that different movies have different average ratings. It calculates b_i, which is the difference from the mean movie rating:
+
+```{r model2}
+movie_avgs <- edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- mu + validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  .$b_i
+
+model_2_rmse <- RMSE(validation$rating, predicted_ratings)
+```
+
+Here is graph presenting movie effect: 
+
+```{r model2movieeffect, echo=FALSE, fig.cap="Movie effect histogram", fig.pos = 'H'}
+movie_avgs %>% qplot(b_i, geom ="histogram", bins = 25, data = ., color = I("black"))
+```
+
+
+Second model provides following RMSE:
+
+```{r model2rmse, echo=FALSE}
+model_2_rmse
+```
+
+```{r model2results, include=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 2 - Movie effect",
+                                     RMSE = model_2_rmse ))
+
+```
+
+### Model 3 - Movie + user effect
+
+This model assumes that different movies have different average ratings and that different users tend to give higher or lower than average ratings. It calculates b_i, which is the difference from the mean movie rating for movies and b_u to reflect user difference from the users' mean rating.
+
+```{r model3}
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- validation %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+
+model_3_rmse <- RMSE(validation$rating, predicted_ratings)
+```
+
+Here is graph presenting user effect: 
+
+```{r model3movieeffect, echo=FALSE, fig.cap="User effect histogram", fig.pos = 'H'}
+user_avgs %>% qplot(b_u, geom ="histogram", bins = 25, data = ., color = I("black"))
+```
+
+
+Third model provides following RMSE:
+
+```{r model3rmse, echo=FALSE}
+model_3_rmse
+```
+
+```{r model3results, include=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 3 - Movie + User effects",  
+                                     RMSE = model_3_rmse ))
+```
+
+### Model 4 - Regularization + movie + user effect 
+
+Additionally to the previous model, now we will be trying to reduce variability of the effect sizes by penalizing large estimates that come from small sample sizes (regularization).
+
+First we need to select optimal lambda parameter to optimize regularization. 
+As validation dataset cannot be used to optimize model parameters, we will divide train set into two subsets 'trainsubset' and 'testsubset'.
+Trainsubset will be used to train model, while testsubset to calculate MRSE for given Lambda.
+Once optimal lambda will be selected, final MRSE will be calculated on validation set.
+This will help us not to overtrain the model.
+
+```{r trainandtestsubsets, results="hide", warning=FALSE, message=FALSE}
+# Initial split
+
+testsubset_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2, list = FALSE)
+trainsubset <- edx[-testsubset_index,]
+temp <- edx[testsubset_index,]
+
+# Make sure userId and movieId in testsubset set are also in trainsubset
+
+testsubset <- temp %>% 
+  semi_join(trainsubset, by = "movieId") %>%
+  semi_join(trainsubset, by = "userId")
+
+# Add rows removed from testsubset back into trainsubet
+
+removed <- anti_join(temp, testsubset)
+trainsubset <- rbind(trainsubset, removed)
+```
+
+Now we run model on train and test subset to select optimal Lambda:
+
+```{r model4}
+lambdas <- seq(0, 20, 1)
+
+
+rmses <- sapply(lambdas, function(l){
+  
+  mu <- mean(trainsubset$rating)
+  
+  b_i <- trainsubset %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- trainsubset %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  predicted_ratings <- testsubset %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred
+  
+  return(RMSE(testsubset$rating ,predicted_ratings))
+})
+```
+
+Here is plot presenting achieved RMSE depending on used Lambda parameter: 
+
+```{r model4movieeffect, echo=FALSE, fig.cap="Model 4: RMSE ~ Lambda", fig.pos = 'H'}
+qplot(lambdas, rmses)  
+```
+
+We now pick Lambda which minimizes RMSE of testsubset:
+
+```{r model4optimallambda, echo=FALSE}
+lambda <- lambdas[which.min(rmses)]
+lambda
+```
+
+MRSE calculated on test subset for optimal Lambda equals to:
+
+```{r model4optimalrmse}
+min(rmses)
+```
+
+Now we need to calculate final RMSE by training model with fixed Lambda on full training set and calculate results for validation set
+
+```{r model4optimal}
+mu <- mean(edx$rating)
+
+b_i <- edx %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambda))
+
+b_u <- edx %>% 
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda))
+
+predicted_ratings <- validation %>% 
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+```
+
+Hence fourth model provides following RMSE:
+
+```{r model4rmse}
+model_4_rmse <- RMSE(validation$rating,predicted_ratings)
+model_4_rmse
+```
+
+```{r model4results, include=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 4 - Regularized Movie + User effects",  
+                                     RMSE = model_4_rmse))
+```
+
+### Model 5 - Regularization + movie + user + genre effect
+
+Additionally to the previous model, we will now account for next available feature: genres.
+
+Because genres come not in tidy format, we need first to separate rows.
+
+```{r model5rowseparation}
+edx_separated <- edx %>% separate_rows(genres, sep = "\\|")
+validation_separated <- validation %>% separate_rows(genres, sep = "\\|")
+trainsubset_separated <- trainsubset %>% separate_rows(genres, sep = "\\|")
+testsubset_separated <- testsubset %>% separate_rows(genres, sep = "\\|")
+```
+
+As in previous regularization model to select Lambda we will be working on trainsubset and testsubset, here on their separated versions.
+
+With this in mind let's select optimal lambda parameter to optimize regularization:
+
+```{r model5}
+lambdas <- seq(0, 20, 1)
+
+rmsesG <- sapply(lambdas, function(l){
+  
+  mu <- mean(trainsubset_separated$rating)
+  
+  b_i <- trainsubset_separated %>% 
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  
+  b_u <- trainsubset_separated %>%
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  
+  b_g <- trainsubset_separated %>% 
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    group_by(genres) %>%
+    summarize(b_g = sum(rating - b_i - b_u - mu)/(n()+l))
+  
+  predicted_ratings <- testsubset_separated %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_g, by = "genres") %>%
+    mutate(pred = mu + b_i + b_u + b_g) %>%
+    .$pred
+  
+  return(RMSE(testsubset_separated$rating,predicted_ratings))
+})
+```
+
+Here is plot presenting achieved RMSE depending on used Lambda parameter: 
+
+```{r model5movieeffect, echo=FALSE, fig.cap="Model 5: RMSE ~ lambda", fig.pos = 'H'}
+qplot(lambdas, rmsesG)  
+```
+
+We now pick Lambda which minimizes RMSE for test subset:
+
+```{r model5optimallambda, echo=FALSE}
+lambdaG <- lambdas[which.min(rmsesG)]
+lambdaG
+```
+
+And find associated with it minimal RMSE achieved on test subset using following formula:
+
+```{r model5optimalrmse}
+min(rmsesG)
+```
+
+Now we need to calculate final RMSE by training model with fixed Lambda on full training set and calculate results for validation set:
+
+```{r model5optimal}
+mu <- mean(edx_separated$rating)
+
+b_i <- edx_separated %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - mu)/(n()+lambdaG))
+
+b_u <- edx_separated %>%
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambdaG))
+
+b_g <- edx_separated%>% 
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - b_i - b_u - mu)/(n()+lambdaG))
+
+predicted_ratings <- validation_separated %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  mutate(pred = mu + b_i + b_u + b_g) %>%
+  .$pred
+```
+
+Fifth model provides following RMSE:
+
+```{r model5rmse}
+model_5_rmse <- RMSE(validation_separated$rating,predicted_ratings)
+model_5_rmse
+```
+
+```{r model5results, include=FALSE}
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Model 5 - Regularized Movie + User + Genres effects",  
+                                     RMSE = model_5_rmse))
+```
+
+## Results
+
+Here is summary of the results achieved for the 5 analysed models (with fixed Lambda parameters for Model 4 and Model 5):
+
+```{r results, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+As we can see best RMSE was achieved in Model 5 with regularization parameter Lambda set to 13.
+
+Let's double confirm our result. For this we will recalculate final model with fixed Lambda parameter:
+
+Mu
+
+```{r finalmu}
+final_mu <- mean(edx$rating)  
+```
+
+Optimal lambda optimizing MRSE has been found to be 13
+
+```{r finallambda}
+final_lambda <- 13
+```
+
+As genres comes not in tidy format, we need first to separate rows for training and validation datasets
+
+```{r finalseparaterows}
+edx_final <- edx %>% separate_rows(genres, sep = "\\|")
+validation_final <- validation  %>% separate_rows(genres, sep = "\\|")
+```
+
+Now, when all parameters are known let's define model
+
+```{r finalmodel}
+b_i <- edx_final %>% 
+  group_by(movieId) %>%
+  summarize(b_i = sum(rating - final_mu)/(n()+final_lambda))
+
+b_u <- edx_final %>%
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - final_mu)/(n()+final_lambda))
+
+b_g <- edx_final %>% 
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  group_by(genres) %>%
+  summarize(b_g = sum(rating - b_i - b_u - final_mu)/(n()+final_lambda))
+
+```
+
+Let's use model to predict ratings
+
+```{r finalpredict}
+predicted_ratings <- validation_final %>%
+  left_join(b_i, by = "movieId") %>%
+  left_join(b_u, by = "userId") %>%
+  left_join(b_g, by = "genres") %>%
+  mutate(pred = final_mu + b_i + b_u + b_g) %>%
+  .$pred
+```
+
+And finally we calculate RMSE of our predictions on validation dataset:
+
+```{r finalrmse}
+RMSE <- RMSE(validation_final$rating,predicted_ratings)
+```
+
+Which confirmes that achieved RMSE is:
+
+```{r resulrmsedisplay, echo=FALSE}
+RMSE
+```
+
+# Conclusion
+
+5 models have been created and analysed with aim to predict movie rating with minimal RMSE.
+
+```{r conclusionresults, echo=FALSE}
+rmse_results %>% knitr::kable()
+```
+
+As best performing in terms of RMSE 5th model has been selected. It accounts for movie, user and genre effects and reduces variability of the effect sizes by penalizing large estimates that come from small sample sizes.
+
+It optimal performance has been observed with regularization parameter Lambda equal to 13.
+
+5th model helped improved accuracy in comparision to the first model by over 18%.
+
+Final model can be improved even further by implementing k-fold validation for finding Lambda and applying Matrix Factorization. First however increases calculation time k-times and latter unfortunately exceeds scope of the course and is not covered in this project.
